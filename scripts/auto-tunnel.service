@@ -1,0 +1,23 @@
+[Unit]
+Description=Auto SSH Tunnel Service
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/local/bin/auto-tunnel --config /etc/auto-tunnel/config.yaml
+Restart=always
+RestartSec=10
+StandardOutput=append:/var/log/auto-tunnel/auto-tunnel.log
+StandardError=append:/var/log/auto-tunnel/error.log
+
+# 一些安全相关的设置
+ProtectSystem=full
+ProtectHome=read-only
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

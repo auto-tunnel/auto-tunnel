@@ -1,0 +1,22 @@
+servers:
+  - name: "example-server"
+    host: "remote-host"
+    port: 22
+    user: "username"
+    auth_method: "key"
+    key_path: "~/.ssh/id_rsa"
+    password: ""
+    timeout: 3
+    tunnels:
+      # - name: "postgres"
+      #   type: "remote_to_local"
+      #   local_host: "0.0.0.0"
+      #   local_port: 5432
+      #   remote_port: 54321
+      #   remote_host: "localhost"
+      # - name: "redis"
+      #   type: "local_to_remote"
+      #   local_host: "127.0.0.1"
+      #   local_port: 6379
+      #   remote_port: 6380
+      #   remote_host: "localhost"

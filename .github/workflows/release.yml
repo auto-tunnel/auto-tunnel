@@ -1,0 +1,157 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  BuildDEB:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.21"
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev
+
+      - name: Set Version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+
+      - name: Build binaries
+        run: |
+          mkdir -p build
+          # Linux amd64
+          GOOS=linux GOARCH=amd64 go build -o build/auto-tunnel-linux-amd64 cmd/tunnel/main.go
+          # Darwin (macOS) amd64
+          GOOS=darwin GOARCH=amd64 go build -o build/auto-tunnel-darwin-amd64 cmd/tunnel/main.go
+          # Darwin (macOS) arm64
+          GOOS=darwin GOARCH=arm64 go build -o build/auto-tunnel-darwin-arm64 cmd/tunnel/main.go
+
+      - name: Build DEB packages
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          mkdir -p build
+          # Build amd64 DEB package
+          make build-deb PACKAGE_VERSION=$VERSION ARCH=amd64
+          # Build tarballs
+          make build-tarball PACKAGE_VERSION=$VERSION ARCH=amd64
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: packages
+          path: |
+            build/auto-tunnel-linux-amd64
+            build/auto-tunnel-darwin-amd64
+            build/auto-tunnel-darwin-arm64
+            build/*.deb
+            build/*.tar.gz
+
+  BuildRPM:
+    runs-on: ubuntu-latest
+    container:
+      image: rockylinux:9
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          dnf install -y rpm-build make golang git gcc rpmdevtools
+          dnf group install -y "Development Tools"
+
+      - name: Set Version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+
+      - name: Build RPM packages
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          mkdir -p build
+          # Set proper permissions
+          chmod -R 777 .
+
+          # Build x86_64 RPM package
+          echo "Building x86_64 RPM..."
+          make build-rpm PACKAGE_VERSION=$VERSION ARCH=amd64
+
+          # Move RPM files to build directory
+          mkdir -p build/rpms
+          find build/rpm/RPMS/ -name "*.rpm" -exec cp {} build/rpms/ \;
+          ls -la build/rpms/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: rpm-packages
+          path: build/rpms/*.rpm
+
+  CreateRelease:
+    needs: [BuildDEB, BuildRPM]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v3
+        with:
+          path: artifacts
+
+      - name: Prepare release files
+        run: |
+          mkdir -p release
+          cp artifacts/packages/* release/ || true
+          cp artifacts/rpm-packages/* release/ || true
+          echo "Release files contents:"
+          ls -la release/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: release/*
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  DockerImage:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            autotunnel/autotunnel:latest
+            autotunnel/autotunnel:${{ github.ref_name }}

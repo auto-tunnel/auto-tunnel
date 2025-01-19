@@ -18,7 +18,7 @@ Auto Tunnel 是一个自动管理 SSH 隧道的服务程序，支持本地端口
 
 ```bash
 # 克隆仓库
-git clone https://github.com/yourusername/auto-tunnel.git
+git clone https://github.com/auto-tunnel/auto-tunnel.git
 cd auto-tunnel
 
 # 编译安装
@@ -31,19 +31,19 @@ sudo make install
 #### DEB 包（Ubuntu/Debian）
 ```bash
 # 下载 DEB 包
-wget https://github.com/auto-tunnel/auto-tunnel/releases/download/v1.0.0/auto-tunnel_1.0.0_amd64.deb
+wget https://github.com/auto-tunnel/auto-tunnel/releases/download/v0.1/auto-tunnel_0.1_amd64.deb
 
 # 安装
-sudo dpkg -i auto-tunnel_1.0.0_amd64.deb
+sudo dpkg -i auto-tunnel_0.1_amd64.deb
 ```
 
 #### RPM 包（CentOS/RHEL）
 ```bash
 # 下载 RPM 包
-wget https://github.com/auto-tunnel/auto-tunnel/releases/download/v1.0.0/auto-tunnel-1.0.0-1.x86_64.rpm
+wget https://github.com/auto-tunnel/auto-tunnel/releases/download/v0.1/auto-tunnel-0.1-1.x86_64.rpm
 
 # 安装
-sudo rpm -i auto-tunnel-1.0.0-1.x86_64.rpm
+sudo rpm -i auto-tunnel-0.1-1.x86_64.rpm
 ```
 
 ## 配置
@@ -154,10 +154,3 @@ MIT License
 
 欢迎提交 Issue 和 Pull Request！如果您发现了 bug 或有新功能建议，请创建 Issue 进行讨论。
 
-## 更新日志
-
-### v1.0.0
-- 初始版本发布
-- 支持基本的端口转发功能
-- 支持从 SSH 配置文件读取主机配置
-- 提供 systemd 服务支持

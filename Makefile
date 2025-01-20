@@ -120,6 +120,7 @@ build-rpm: build
 	echo "Summary: $(PACKAGE_DESCRIPTION)" >> $(RPM_DIR)/SPECS/$(BINARY_NAME).spec
 	echo "License: MIT" >> $(RPM_DIR)/SPECS/$(BINARY_NAME).spec
 	echo "BuildArch: $(RPM_ARCH)" >> $(RPM_DIR)/SPECS/$(BINARY_NAME).spec
+	echo "ExclusiveArch: $(RPM_ARCH)" >> $(RPM_DIR)/SPECS/$(BINARY_NAME).spec
 	echo "AutoReqProv: no" >> $(RPM_DIR)/SPECS/$(BINARY_NAME).spec
 	# 使用 realpath 获取绝对路径，避免路径重复问题
 	echo "%define _topdir $(shell realpath $(RPM_DIR))" >> $(RPM_DIR)/SPECS/$(BINARY_NAME).spec
@@ -160,7 +161,7 @@ build-rpm: build
 	echo "" >> $(RPM_DIR)/SPECS/$(BINARY_NAME).spec
 	
 	# 构建 RPM 包
-	cd $(RPM_DIR) && rpmbuild -bb SPECS/$(BINARY_NAME).spec
+	cd $(RPM_DIR) && rpmbuild --target $(RPM_ARCH) -bb SPECS/$(BINARY_NAME).spec
 
 .PHONY: build-tarball
 build-tarball: build

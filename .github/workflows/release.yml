@@ -85,6 +85,9 @@ jobs:
 
   BuildRPM:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
     container:
       image: rockylinux:9
     steps:
@@ -93,10 +96,17 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
       - name: Install dependencies
         run: |
-          dnf install -y rpm-build make golang git gcc rpmdevtools
+          dnf install -y rpm-build make golang git gcc rpmdevtools qemu-user-static
           dnf group install -y "Development Tools"
+          # 为 ARM64 架构安装额外的依赖
+          if [ "${{ matrix.arch }}" = "arm64" ]; then
+            dnf install -y gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
+          fi
 
       - name: Set Version
         run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
@@ -109,13 +119,9 @@ jobs:
           # 设置正确的工作目录权限
           chmod -R 777 .
 
-          # 构建 AMD64 RPM 包
-          echo "Building AMD64 RPM package..."
-          make build-rpm PACKAGE_VERSION=$VERSION ARCH=amd64 BUILD_DIR=$PWD/build
-
-          # 构建 ARM64 RPM 包
-          echo "Building ARM64 RPM package..."
-          make build-rpm PACKAGE_VERSION=$VERSION ARCH=arm64 BUILD_DIR=$PWD/build
+          # 构建 RPM 包
+          echo "Building ${{ matrix.arch }} RPM package..."
+          make build-rpm PACKAGE_VERSION=$VERSION ARCH=${{ matrix.arch }} BUILD_DIR=$PWD/build
 
           # 创建 RPM 输出目录
           mkdir -p build/rpms
@@ -128,7 +134,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v3
         with:
-          name: rpm-packages
+          name: rpm-packages-${{ matrix.arch }}
           path: build/rpms/*.rpm
 
   CreateRelease:
@@ -147,7 +153,7 @@ jobs:
         run: |
           mkdir -p release
           cp artifacts/packages/* release/ || true
-          cp artifacts/rpm-packages/* release/ || true
+          cp artifacts/rpm-packages-*/* release/ || true
           echo "Release files contents:"
           ls -la release/
 

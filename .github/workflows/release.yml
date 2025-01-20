@@ -19,6 +19,12 @@ jobs:
         with:
           go-version: "1.21"
 
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -27,24 +33,43 @@ jobs:
       - name: Set Version
         run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
 
-      - name: Build binaries
+      - name: Create builder container
         run: |
+          # 创建一个支持多架构的构建容器
+          docker buildx create --name multiarch-builder --driver docker-container --use
+          docker buildx inspect --bootstrap
+
+      - name: Build binaries and packages
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
           mkdir -p build
+
+          # 构建所有架构的二进制文件
+          echo "Building binaries for all architectures..."
           # Linux amd64
           GOOS=linux GOARCH=amd64 go build -o build/auto-tunnel-linux-amd64 cmd/tunnel/main.go
+          # Linux arm64
+          GOOS=linux GOARCH=arm64 go build -o build/auto-tunnel-linux-arm64 cmd/tunnel/main.go
           # Darwin (macOS) amd64
           GOOS=darwin GOARCH=amd64 go build -o build/auto-tunnel-darwin-amd64 cmd/tunnel/main.go
           # Darwin (macOS) arm64
           GOOS=darwin GOARCH=arm64 go build -o build/auto-tunnel-darwin-arm64 cmd/tunnel/main.go
 
-      - name: Build DEB packages
-        run: |
-          VERSION=${GITHUB_REF#refs/tags/v}
-          mkdir -p build
+          # 构建所有架构的DEB包
+          echo "Building DEB packages for all architectures..."
           # Build amd64 DEB package
           make build-deb PACKAGE_VERSION=$VERSION ARCH=amd64
-          # Build tarballs
+          # Build arm64 DEB package
+          make build-deb PACKAGE_VERSION=$VERSION ARCH=arm64
+
+          # 构建所有架构的tarball
+          echo "Building tarballs for all architectures..."
           make build-tarball PACKAGE_VERSION=$VERSION ARCH=amd64
+          make build-tarball PACKAGE_VERSION=$VERSION ARCH=arm64
+
+          # 列出构建的文件
+          echo "Built files:"
+          ls -la build/
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v3
@@ -52,6 +77,7 @@ jobs:
           name: packages
           path: |
             build/auto-tunnel-linux-amd64
+            build/auto-tunnel-linux-arm64
             build/auto-tunnel-darwin-amd64
             build/auto-tunnel-darwin-arm64
             build/*.deb
@@ -79,16 +105,24 @@ jobs:
         run: |
           VERSION=${GITHUB_REF#refs/tags/v}
           mkdir -p build
-          # Set proper permissions
+
+          # 设置正确的工作目录权限
           chmod -R 777 .
 
-          # Build x86_64 RPM package
-          echo "Building x86_64 RPM..."
-          make build-rpm PACKAGE_VERSION=$VERSION ARCH=amd64
+          # 构建 AMD64 RPM 包
+          echo "Building AMD64 RPM package..."
+          make build-rpm PACKAGE_VERSION=$VERSION ARCH=amd64 BUILD_DIR=$PWD/build
 
-          # Move RPM files to build directory
+          # 构建 ARM64 RPM 包
+          echo "Building ARM64 RPM package..."
+          make build-rpm PACKAGE_VERSION=$VERSION ARCH=arm64 BUILD_DIR=$PWD/build
+
+          # 创建 RPM 输出目录
           mkdir -p build/rpms
-          find build/rpm/RPMS/ -name "*.rpm" -exec cp {} build/rpms/ \;
+          # 查找并移动所有 RPM 文件到输出目录
+          find . -name "*.rpm" -exec cp {} build/rpms/ \;
+
+          echo "Built RPM packages:"
           ls -la build/rpms/
 
       - name: Upload artifacts

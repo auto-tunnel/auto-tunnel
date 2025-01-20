@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -38,6 +39,8 @@ type SSHConfig struct {
 	Port         int
 	User         string
 	IdentityFile string
+	ProxyCommand string
+	ProxyJump    string
 }
 
 // SSH 配置相关
@@ -65,6 +68,8 @@ func loadSSHConfig(host string) (*SSHConfig, error) {
 // parseSSHConfig 解析 SSH 配置文件内容
 func parseSSHConfig(configBytes []byte, targetHost string) (*SSHConfig, error) {
 	config := &SSHConfig{Host: targetHost}
+	var defaultConfig SSHConfig
+	var currentConfig *SSHConfig
 	var currentHost string
 
 	lines := strings.Split(string(configBytes), "\n")
@@ -84,32 +89,79 @@ func parseSSHConfig(configBytes []byte, targetHost string) (*SSHConfig, error) {
 
 		if key == "host" {
 			currentHost = value
+			if currentHost == "*" {
+				currentConfig = &defaultConfig
+			} else if matchHost(targetHost, currentHost) {
+				currentConfig = config
+			} else {
+				currentConfig = nil
+			}
 			continue
 		}
 
-		if currentHost != targetHost {
+		if currentConfig == nil {
 			continue
 		}
 
 		switch key {
 		case "hostname":
-			config.HostName = value
+			currentConfig.HostName = value
 		case "port":
 			if port, err := strconv.Atoi(value); err == nil {
-				config.Port = port
+				currentConfig.Port = port
 			}
 		case "user":
-			config.User = value
+			currentConfig.User = value
 		case "identityfile":
-			config.IdentityFile = value
+			currentConfig.IdentityFile = value
+		case "proxycommand":
+			currentConfig.ProxyCommand = value
+		case "proxyjump":
+			currentConfig.ProxyJump = value
 		}
 	}
 
+	// 应用默认配置（如果存在且目标配置中对应字段为空）
 	if config.HostName == "" {
-		return nil, nil
+		config.HostName = defaultConfig.HostName
+	}
+	if config.Port == 0 {
+		config.Port = defaultConfig.Port
+	}
+	if config.User == "" {
+		config.User = defaultConfig.User
+	}
+	if config.IdentityFile == "" {
+		config.IdentityFile = defaultConfig.IdentityFile
+	}
+	if config.ProxyCommand == "" {
+		config.ProxyCommand = defaultConfig.ProxyCommand
+	}
+	if config.ProxyJump == "" {
+		config.ProxyJump = defaultConfig.ProxyJump
+	}
+
+	// 如果没有找到主机名，但有默认配置，使用目标主机名作为主机名
+	if config.HostName == "" && defaultConfig.User != "" {
+		config.HostName = targetHost
 	}
 
 	return config, nil
+}
+
+// matchHost 检查目标主机是否匹配SSH配置中的Host模式
+func matchHost(target, pattern string) bool {
+	// 将模式转换为正则表达式
+	pattern = strings.ReplaceAll(pattern, ".", "\\.")
+	pattern = strings.ReplaceAll(pattern, "*", ".*")
+	pattern = strings.ReplaceAll(pattern, "?", ".")
+	pattern = "^" + pattern + "$"
+
+	matched, err := regexp.MatchString(pattern, target)
+	if err != nil {
+		return false
+	}
+	return matched
 }
 
 // 客户端创建和连接
@@ -117,26 +169,89 @@ func parseSSHConfig(configBytes []byte, targetHost string) (*SSHConfig, error) {
 
 // NewClient 创建新的 SSH 客户端
 func NewClient(host string, port int, user string, authMethod string, keyPath string, password string, timeout int) (*Client, error) {
+	log.Printf("Initial config: host=%s, port=%d, user=%s, authMethod=%s", host, port, user, authMethod)
+
+	// 设置默认值
+	if port == 0 {
+		port = 22
+	}
+
+	// 尝试从SSH配置文件加载配置
 	sshConfig, err := loadSSHConfig(host)
 	if err != nil {
 		log.Printf("failed to load ssh config: %v", err)
 	}
 
-	// 应用 SSH 配置
+	// 处理用户名优先级：
+	// 1. YAML配置中指定的用户名
+	// 2. SSH配置中的用户名（包括默认配置）
+	// 3. 系统环境变量
+	if user == "" && sshConfig != nil && sshConfig.User != "" {
+		user = sshConfig.User
+		log.Printf("Using user from SSH config: %s", user)
+	}
+	if user == "" {
+		user = os.Getenv("USER")
+		if user == "" {
+			user = os.Getenv("USERNAME") // 为Windows系统
+		}
+		log.Printf("Using system user: %s", user)
+	}
+
+	// 处理主机名和端口
 	if sshConfig != nil {
-		if sshConfig.HostName != "" {
+		if sshConfig.HostName != "" && host == sshConfig.Host {
 			log.Printf("Using SSH config: %s -> %s", host, sshConfig.HostName)
 			host = sshConfig.HostName
 		}
-		if sshConfig.Port > 0 {
+		if port == 22 && sshConfig.Port > 0 {
 			port = sshConfig.Port
 		}
-		if sshConfig.User != "" {
-			user = sshConfig.User
+	}
+
+	// 处理认证方法
+	if authMethod != "" {
+		// 如果明确指定了认证方法，就使用指定的方法
+		log.Printf("Using specified auth method: %s", authMethod)
+		switch authMethod {
+		case "key":
+			if keyPath == "" && sshConfig != nil && sshConfig.IdentityFile != "" {
+				keyPath = sshConfig.IdentityFile
+				log.Printf("Using identity file from SSH config: %s", keyPath)
+			}
+		case "password":
+			if password == "" {
+				return nil, fmt.Errorf("password is required when auth_method is set to password")
+			}
+		default:
+			return nil, fmt.Errorf("unsupported auth method: %s", authMethod)
 		}
-		if authMethod == "key" && sshConfig.IdentityFile != "" && keyPath == "" {
+	} else {
+		// 如果没有指定认证方法，按优先级尝试：
+		// 1. 如果指定了key_path，使用密钥认证
+		// 2. 如果指定了password，使用密码认证
+		// 3. 如果SSH配置中有IdentityFile，使用密钥认证
+		if keyPath != "" {
+			authMethod = "key"
+			log.Printf("Using key authentication with specified key path: %s", keyPath)
+		} else if password != "" {
+			authMethod = "password"
+			log.Printf("Using password authentication")
+		} else if sshConfig != nil && sshConfig.IdentityFile != "" {
+			authMethod = "key"
 			keyPath = sshConfig.IdentityFile
+			log.Printf("Using identity file from SSH config: %s", keyPath)
+		} else {
+			return nil, fmt.Errorf("no authentication method available: please provide either key_path or password")
 		}
+	}
+
+	// 验证认证方法的必要参数
+	if authMethod == "key" && keyPath == "" {
+		return nil, fmt.Errorf("key_path is required for key authentication")
+	}
+	if authMethod == "password" && password == "" {
+		return nil, fmt.Errorf("password is required for password authentication")
 	}
 
 	config, err := createSSHConfig(user, authMethod, keyPath, password, timeout)
@@ -157,15 +272,40 @@ func NewClient(host string, port int, user string, authMethod string, keyPath st
 func createSSHConfig(user, authMethod, keyPath, password string, timeout int) (*ssh.ClientConfig, error) {
 	var auths []ssh.AuthMethod
 
+	log.Printf("Creating SSH config: user=%s, authMethod=%s, keyPath=%s", user, authMethod, keyPath)
+
 	switch authMethod {
 	case "key":
-		auth, err := publicKeyFile(keyPath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to load key file: %w", err)
+		if keyPath == "" {
+			return nil, fmt.Errorf("key_path is required for key authentication")
 		}
-		auths = append(auths, auth)
+		expandedPath, err := expandPath(keyPath)
+		if err != nil {
+			log.Printf("Failed to expand key path %s: %v", keyPath, err)
+			return nil, fmt.Errorf("failed to expand key path: %w", err)
+		}
+		log.Printf("Using expanded key path: %s", expandedPath)
+
+		buffer, err := os.ReadFile(expandedPath)
+		if err != nil {
+			log.Printf("Failed to read key file %s: %v", expandedPath, err)
+			return nil, fmt.Errorf("failed to read key file: %w", err)
+		}
+
+		key, err := ssh.ParsePrivateKey(buffer)
+		if err != nil {
+			log.Printf("Failed to parse private key %s: %v", expandedPath, err)
+			return nil, fmt.Errorf("failed to parse private key: %w", err)
+		}
+		log.Printf("Successfully loaded private key from %s", expandedPath)
+
+		auths = append(auths, ssh.PublicKeys(key))
 	case "password":
+		if password == "" {
+			return nil, fmt.Errorf("password is required for password authentication")
+		}
 		auths = append(auths, ssh.Password(password))
+		log.Printf("Using password authentication")
 	default:
 		return nil, fmt.Errorf("unsupported auth method: %s", authMethod)
 	}

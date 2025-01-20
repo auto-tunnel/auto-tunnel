@@ -83,21 +83,45 @@ build-deb: build
 	echo "Architecture: $(DEB_ARCH)" >> $(DEB_DIR)/DEBIAN/control
 	echo "Maintainer: $(PACKAGE_MAINTAINER)" >> $(DEB_DIR)/DEBIAN/control
 	echo "Description: $(PACKAGE_DESCRIPTION)" >> $(DEB_DIR)/DEBIAN/control
+	echo "Priority: optional" >> $(DEB_DIR)/DEBIAN/control
+	echo "Section: utils" >> $(DEB_DIR)/DEBIAN/control
 	
 	# 创建 postinst 脚本
 	echo "#!/bin/sh" > $(DEB_DIR)/DEBIAN/postinst
+	echo "set -e" >> $(DEB_DIR)/DEBIAN/postinst
+	echo "# 设置正确的权限" >> $(DEB_DIR)/DEBIAN/postinst
+	echo "chown -R root:root /usr/local/bin/$(BINARY_NAME)" >> $(DEB_DIR)/DEBIAN/postinst
+	echo "chown -R root:root /etc/auto-tunnel" >> $(DEB_DIR)/DEBIAN/postinst
+	echo "chown -R root:root /etc/systemd/system/auto-tunnel.service" >> $(DEB_DIR)/DEBIAN/postinst
+	echo "chmod 755 /usr/local/bin/$(BINARY_NAME)" >> $(DEB_DIR)/DEBIAN/postinst
+	echo "chmod 644 /etc/auto-tunnel/config.yaml" >> $(DEB_DIR)/DEBIAN/postinst
+	echo "chmod 644 /etc/systemd/system/auto-tunnel.service" >> $(DEB_DIR)/DEBIAN/postinst
+	echo "chmod 755 /var/log/auto-tunnel" >> $(DEB_DIR)/DEBIAN/postinst
 	echo "systemctl daemon-reload" >> $(DEB_DIR)/DEBIAN/postinst
 	echo "systemctl enable auto-tunnel" >> $(DEB_DIR)/DEBIAN/postinst
 	echo "systemctl start auto-tunnel" >> $(DEB_DIR)/DEBIAN/postinst
 	chmod 755 $(DEB_DIR)/DEBIAN/postinst
 	
+	# 创建 prerm 脚本
+	echo "#!/bin/sh" > $(DEB_DIR)/DEBIAN/prerm
+	echo "set -e" >> $(DEB_DIR)/DEBIAN/prerm
+	echo "if [ -d /run/systemd/system ] && [ \"\$$1\" = remove ]; then" >> $(DEB_DIR)/DEBIAN/prerm
+	echo "    systemctl --no-reload disable auto-tunnel.service > /dev/null 2>&1 || true" >> $(DEB_DIR)/DEBIAN/prerm
+	echo "    systemctl stop auto-tunnel.service > /dev/null 2>&1 || true" >> $(DEB_DIR)/DEBIAN/prerm
+	echo "fi" >> $(DEB_DIR)/DEBIAN/prerm
+	chmod 755 $(DEB_DIR)/DEBIAN/prerm
+	
 	# 设置权限
 	chmod 755 $(DEB_DIR)/usr/local/bin/$(BINARY_NAME)
 	chmod 644 $(DEB_DIR)/etc/auto-tunnel/config.yaml
 	chmod 644 $(DEB_DIR)/etc/systemd/system/auto-tunnel.service
+	chmod -R 755 $(DEB_DIR)/DEBIAN
 	
-	# 构建 deb 包
-	cd $(BUILD_DIR) && dpkg-deb --build deb-$(ARCH) "$(BINARY_NAME)_$(PACKAGE_VERSION)_$(DEB_ARCH).deb"
+	# 构建 deb 包，使用 gzip 压缩
+	cd $(BUILD_DIR) && GZIP=-9 DEB_BUILD_OPTIONS=nocheck dpkg-deb -Zgzip --build deb-$(ARCH) "$(BINARY_NAME)_$(PACKAGE_VERSION)_$(DEB_ARCH).deb"
+	
+	# 设置生成的 DEB 包权限
+	chmod 644 $(BUILD_DIR)/$(BINARY_NAME)_$(PACKAGE_VERSION)_$(DEB_ARCH).deb
 
 .PHONY: build-rpm
 build-rpm: build

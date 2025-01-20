@@ -96,8 +96,8 @@ build-deb: build
 	chmod 644 $(DEB_DIR)/etc/auto-tunnel/config.yaml
 	chmod 644 $(DEB_DIR)/etc/systemd/system/auto-tunnel.service
 	
-	# 构建 deb 包
-	cd $(BUILD_DIR) && dpkg-deb --build deb-$(ARCH) "$(BINARY_NAME)_$(PACKAGE_VERSION)_$(DEB_ARCH).deb"
+	# 构建 deb 包，使用 gzip 压缩
+	cd $(BUILD_DIR) && GZIP=-9 DEB_BUILD_OPTIONS=nocheck dpkg-deb -Zgzip --build deb-$(ARCH) "$(BINARY_NAME)_$(PACKAGE_VERSION)_$(DEB_ARCH).deb"
 
 .PHONY: build-rpm
 build-rpm: build

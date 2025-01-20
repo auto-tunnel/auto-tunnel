@@ -60,6 +60,10 @@ func LoadConfig(path string) (*Config, error) {
 				config.Servers[i].Tunnels[j].LocalHost = "127.0.0.1"
 			}
 		}
+		// 设置默认的超时时间
+		if config.Servers[i].Timeout == 0 {
+			config.Servers[i].Timeout = 5
+		}
 	}
 
 	// 验证配置
@@ -89,30 +93,31 @@ func validateConfig(cfg *Config) error {
 }
 
 func validateServer(server ServerConfig, index int) error {
+	if server.Host == "" && server.Name == "" {
+		return fmt.Errorf("server[%d]: either host or name is required", index)
+	}
 	if server.Name == "" {
 		return fmt.Errorf("server[%d]: name is required", index)
 	}
-	if server.Host == "" {
-		return fmt.Errorf("server[%d]: host is required", index)
-	}
-	if server.Port <= 0 || server.Port > 65535 {
+
+	// 如果端口被指定，验证其有效性
+	if server.Port != 0 && (server.Port <= 0 || server.Port > 65535) {
 		return fmt.Errorf("server[%d]: invalid port number", index)
 	}
-	if server.User == "" {
-		return fmt.Errorf("server[%d]: user is required", index)
-	}
 
-	// 验证认证方法
-	server.AuthMethod = strings.ToLower(server.AuthMethod)
-	if server.AuthMethod != "password" && server.AuthMethod != "key" {
-		return fmt.Errorf("server[%d]: auth_method must be either 'password' or 'key'", index)
-	}
+	// 如果认证方法被指定，验证其有效性
+	if server.AuthMethod != "" {
+		server.AuthMethod = strings.ToLower(server.AuthMethod)
+		if server.AuthMethod != "password" && server.AuthMethod != "key" {
+			return fmt.Errorf("server[%d]: auth_method must be either 'password' or 'key'", index)
+		}
 
-	if server.AuthMethod == "key" && server.KeyPath == "" {
-		return fmt.Errorf("server[%d]: key_path is required when using key authentication", index)
-	}
-	if server.AuthMethod == "password" && server.Password == "" {
-		return fmt.Errorf("server[%d]: password is required when using password authentication", index)
+		if server.AuthMethod == "key" && server.KeyPath == "" {
+			return fmt.Errorf("server[%d]: key_path is required when using key authentication", index)
+		}
+		if server.AuthMethod == "password" && server.Password == "" {
+			return fmt.Errorf("server[%d]: password is required when using password authentication", index)
+		}
 	}
 
 	// 验证隧道配置

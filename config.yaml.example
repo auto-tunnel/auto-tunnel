@@ -1,22 +1,50 @@
+# Auto Tunnel 配置文件示例
+# 支持多个服务器配置，每个服务器可以包含多个隧道
+
 servers:
-  - name: "example-server"
-    host: "remote-host"
-    port: 22
-    user: "username"
-    auth_method: "key"
-    key_path: "~/.ssh/id_rsa"
-    password: ""
-    timeout: 3
+  # 服务器配置示例
+  - name: "example-server"    # 服务器名称，必填，用于标识和日志输出
+    host: "remote-host"       # 远程主机地址，支持域名或IP，也可以是~/.ssh/config中的Host名称
+    port: 22                  # SSH端口，可选，默认22
+    user: "username"          # SSH用户名，可选，如果不填会按以下顺序获取：
+                              #   1. ~/.ssh/config中对应Host的User
+                              #   2. ~/.ssh/config中的默认User（Host *）
+                              #   3. 当前系统用户名
+    
+    # 认证相关配置
+    auth_method: "key"        # 认证方式，可选，可选值：key（密钥认证）或 password（密码认证）
+                              # 如果不指定auth_method，会按以下顺序尝试：
+                              #   1. 如果指定了key_path，使用密钥认证
+                              #   2. 如果指定了password，使用密码认证
+                              #   3. 如果~/.ssh/config中有IdentityFile，使用密钥认证
+                              #   4. 如果都没有，报错
+    
+    key_path: "~/.ssh/id_rsa" # SSH私钥路径，当auth_method为key时必填
+                              # 支持以下格式的密钥：
+                              #   - RSA (id_rsa)
+                              #   - ED25519 (id_ed25519)
+                              #   - ECDSA (id_ecdsa)
+                              #   - DSA (id_dsa)
+    
+    password: ""              # SSH密码，当auth_method为password时必填
+    timeout: 3                # 连接超时时间（秒），可选，默认5秒
+    
+    # 隧道配置，支持多个隧道
     tunnels:
-      # - name: "postgres"
-      #   type: "remote_to_local"
-      #   local_host: "0.0.0.0"
-      #   local_port: 5432
-      #   remote_port: 54321
-      #   remote_host: "localhost"
-      # - name: "redis"
-      #   type: "local_to_remote"
-      #   local_host: "127.0.0.1"
-      #   local_port: 6379
-      #   remote_port: 6380
-      #   remote_host: "localhost"
+      # 远程端口转发到本地的示例（remote_to_local）
+      - name: "postgres"              # 隧道名称，必填，用于标识和日志输出
+        type: "remote_to_local"       # 隧道类型：remote_to_local（远程转发到本地）
+        local_host: "0.0.0.0"         # 本地监听地址，可选，默认127.0.0.1
+                                      # 如果需要其他机器访问，可以设置为0.0.0.0
+        local_port: 5432              # 本地监听端口，必填
+        remote_port: 54321            # 远程目标端口，必填
+        remote_host: "localhost"      # 远程目标主机，必填
+                                      # 通常是"localhost"，表示远程服务器本机
+      
+      # 本地端口转发到远程的示例（local_to_remote）
+      - name: "redis"                 # 隧道名称
+        type: "local_to_remote"       # 隧道类型：local_to_remote（本地转发到远程）
+        local_host: "127.0.0.1"       # 本地监听地址
+        local_port: 6379              # 本地监听端口
+        remote_port: 6380             # 远程目标端口
+        remote_host: "localhost"      # 远程目标主机

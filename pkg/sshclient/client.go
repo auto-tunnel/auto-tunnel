@@ -21,15 +21,29 @@ import (
 // 类型定义
 // -----------------------------
 
+// TunnelConfig 隧道配置结构
+type TunnelConfig struct {
+	LocalHost  string
+	LocalPort  int
+	RemoteHost string
+	RemotePort int
+	IsRemote   bool
+}
+
 // Client SSH 客户端结构
 type Client struct {
-	config    *ssh.ClientConfig
-	client    *ssh.Client
-	host      string
-	port      int
-	timeout   int
-	listeners []net.Listener
-	mu        sync.Mutex
+	config         *ssh.ClientConfig
+	client         *ssh.Client
+	host           string
+	port           int
+	timeout        int
+	listeners      []net.Listener
+	mu             sync.Mutex
+	reconnectDelay time.Duration
+	maxRetries     int
+	isConnected    atomic.Bool
+	// 添加隧道配置存储
+	tunnels []TunnelConfig
 }
 
 // SSHConfig SSH 配置文件解析结构
@@ -260,11 +274,13 @@ func NewClient(host string, port int, user string, authMethod string, keyPath st
 	}
 
 	return &Client{
-		config:    config,
-		host:      host,
-		port:      port,
-		timeout:   timeout,
-		listeners: make([]net.Listener, 0),
+		config:         config,
+		host:           host,
+		port:           port,
+		timeout:        timeout,
+		listeners:      make([]net.Listener, 0),
+		reconnectDelay: 5 * time.Second, // 重连延迟5秒
+		maxRetries:     -1,              // -1表示无限重试
 	}, nil
 }
 
@@ -343,10 +359,113 @@ func createSSHConfig(user, authMethod, keyPath, password string, timeout int) (*
 // Connect 连接到 SSH 服务器
 func (c *Client) Connect(ctx context.Context) error {
 	addr := fmt.Sprintf("%s:%d", c.host, c.port)
-	timeoutCtx, cancel := context.WithTimeout(ctx, time.Duration(c.timeout*2)*time.Second)
-	defer cancel()
 
-	return c.connectWithTimeout(timeoutCtx, addr)
+	// 启动保活和重连 goroutine
+	go c.keepAliveAndReconnect(ctx)
+
+	return c.connectWithRetry(ctx, addr)
+}
+
+// connectWithRetry 带重试的连接实现
+func (c *Client) connectWithRetry(ctx context.Context, addr string) error {
+	var lastErr error
+	retries := 0
+
+	for c.maxRetries < 0 || retries <= c.maxRetries {
+		err := c.connectWithTimeout(ctx, addr)
+		if err == nil {
+			c.isConnected.Store(true)
+			return nil
+		}
+
+		lastErr = err
+		retries++
+
+		log.Printf("Connection attempt %d failed: %v. Retrying in %v...",
+			retries, err, c.reconnectDelay)
+
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("context cancelled during connection retry: %w", lastErr)
+		case <-time.After(c.reconnectDelay):
+			continue
+		}
+	}
+
+	return fmt.Errorf("failed to connect after %d retries: %w", retries, lastErr)
+}
+
+// keepAliveAndReconnect 保持连接活跃并在断开时重连
+func (c *Client) keepAliveAndReconnect(ctx context.Context) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if c.client == nil {
+				continue
+			}
+
+			// 发送 keep-alive 消息
+			_, _, err := c.client.SendRequest("keepalive@openssh.com", true, nil)
+			if err != nil {
+				log.Printf("Keep-alive failed: %v", err)
+				c.isConnected.Store(false)
+
+				// 关闭旧连接
+				c.client.Close()
+
+				// 尝试重新连接
+				addr := fmt.Sprintf("%s:%d", c.host, c.port)
+				if err := c.connectWithRetry(ctx, addr); err != nil {
+					log.Printf("Failed to reconnect: %v", err)
+					continue
+				}
+
+				// 重新建立所有端口转发
+				c.reestablishTunnels(ctx)
+			}
+		}
+	}
+}
+
+// reestablishTunnels 重新建立所有端口转发
+func (c *Client) reestablishTunnels(ctx context.Context) {
+	c.mu.Lock()
+	tunnels := make([]TunnelConfig, len(c.tunnels))
+	copy(tunnels, c.tunnels)
+	c.mu.Unlock()
+
+	// 关闭所有现有监听器
+	c.mu.Lock()
+	for _, l := range c.listeners {
+		l.Close()
+	}
+	c.listeners = make([]net.Listener, 0)
+	c.mu.Unlock()
+
+	// 重新建立所有隧道
+	for _, tunnel := range tunnels {
+		select {
+		case <-ctx.Done():
+			log.Printf("Context cancelled while reestablishing tunnels")
+			return
+		default:
+			var err error
+			if tunnel.IsRemote {
+				err = c.RemoteToLocal(ctx, tunnel.LocalHost, tunnel.LocalPort, tunnel.RemoteHost, tunnel.RemotePort)
+			} else {
+				err = c.LocalToRemote(ctx, tunnel.LocalHost, tunnel.LocalPort, tunnel.RemoteHost, tunnel.RemotePort)
+			}
+			if err != nil {
+				log.Printf("Failed to reestablish tunnel %s:%d -> %s:%d: %v",
+					tunnel.LocalHost, tunnel.LocalPort, tunnel.RemoteHost, tunnel.RemotePort, err)
+			}
+		}
+	}
 }
 
 // connectWithTimeout 带超时的连接实现
@@ -400,6 +519,15 @@ func (c *Client) Close() error {
 // LocalToRemote 本地到远程的端口转发
 // 在远程服务器上监听端口，将流量转发到本地指定的地址
 func (c *Client) LocalToRemote(ctx context.Context, localHost string, localPort int, remoteHost string, remotePort int) error {
+	// 保存隧道配置
+	c.addTunnel(TunnelConfig{
+		LocalHost:  localHost,
+		LocalPort:  localPort,
+		RemoteHost: remoteHost,
+		RemotePort: remotePort,
+		IsRemote:   false,
+	})
+
 	// 使用 RequestRemotePort 来请求端口转发
 	addr := fmt.Sprintf("%s:%d", remoteHost, remotePort)
 	log.Printf("Requesting remote port forward for %s", addr)
@@ -496,6 +624,15 @@ func (c *Client) LocalToRemote(ctx context.Context, localHost string, localPort 
 
 // RemoteToLocal 远程端口转发到本地
 func (c *Client) RemoteToLocal(ctx context.Context, localHost string, localPort int, remoteHost string, remotePort int) error {
+	// 保存隧道配置
+	c.addTunnel(TunnelConfig{
+		LocalHost:  localHost,
+		LocalPort:  localPort,
+		RemoteHost: remoteHost,
+		RemotePort: remotePort,
+		IsRemote:   true,
+	})
+
 	return c.createTunnel(ctx, localHost, localPort, remoteHost, remotePort, true)
 }
 
@@ -505,19 +642,35 @@ func (c *Client) createTunnel(ctx context.Context, localHost string, localPort i
 		localHost = "127.0.0.1"
 	}
 
-	listener, err := c.createListener(localHost, localPort)
-	if err != nil {
-		return err
-	}
-	defer listener.Close()
-
 	tunnelType := "local to remote"
 	if isRemote {
 		tunnelType = "remote to local"
 	}
-	log.Printf("Created %s tunnel: %s:%d -> %s:%d", tunnelType, localHost, localPort, remoteHost, remotePort)
+	log.Printf("Creating %s tunnel: %s:%d -> %s:%d", tunnelType, localHost, localPort, remoteHost, remotePort)
 
-	return c.handleConnections(ctx, listener, remoteHost, remotePort)
+	var lastErr error
+	for {
+		listener, err := c.createListener(localHost, localPort)
+		if err != nil {
+			return fmt.Errorf("failed to create %s tunnel listener: %w", tunnelType, err)
+		}
+
+		err = c.handleConnections(ctx, listener, remoteHost, remotePort)
+		if err != nil {
+			lastErr = err
+			log.Printf("%s tunnel error: %v, retrying...", tunnelType, err)
+			listener.Close()
+
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("context cancelled for %s tunnel: %w", tunnelType, lastErr)
+			case <-time.After(c.reconnectDelay):
+				continue
+			}
+		}
+
+		return nil
+	}
 }
 
 // 工具函数
@@ -591,17 +744,34 @@ func (c *Client) handleConnections(ctx context.Context, listener net.Listener, r
 
 func (c *Client) proxyConn(ctx context.Context, conn1, conn2 net.Conn, connID int32) {
 	done := make(chan struct{}, 2)
-
 	var bytesIn, bytesOut int64
 
-	go func() {
+	copyData := func(dst, src net.Conn, byteCount *int64) {
 		defer func() { done <- struct{}{} }()
-		bytesIn = copyDataWithCount(conn1, conn2)
-	}()
+		*byteCount = copyDataWithCount(dst, src)
+	}
 
+	go copyData(conn1, conn2, &bytesIn)
+	go copyData(conn2, conn1, &bytesOut)
+
+	// 设置超时检测
 	go func() {
-		defer func() { done <- struct{}{} }()
-		bytesOut = copyDataWithCount(conn2, conn1)
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				// 检查连接是否仍然活跃
+				if !c.isConnected.Load() {
+					conn1.Close()
+					conn2.Close()
+					return
+				}
+			}
+		}
 	}()
 
 	select {
@@ -611,7 +781,6 @@ func (c *Client) proxyConn(ctx context.Context, conn1, conn2 net.Conn, connID in
 	case <-done:
 		log.Printf("[Conn-%d] Connection finished. Bytes in: %d, Bytes out: %d",
 			connID, bytesIn, bytesOut)
-		return
 	}
 }
 
@@ -685,4 +854,11 @@ func publicKeyFile(file string) (ssh.AuthMethod, error) {
 	}
 
 	return ssh.PublicKeys(key), nil
+}
+
+// addTunnel 添加隧道配置
+func (c *Client) addTunnel(config TunnelConfig) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.tunnels = append(c.tunnels, config)
 }

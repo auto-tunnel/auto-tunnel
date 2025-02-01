@@ -319,7 +319,7 @@ func newSSHClientConfig(user, authMethod, keyPath, password string, timeout int)
 		return nil, fmt.Errorf("unsupported auth method: %s", authMethod)
 	}
 
-	timeoutDuration := 10 * time.Second
+	timeoutDuration := 5 * time.Second
 	if timeout > 0 {
 		timeoutDuration = time.Duration(timeout) * time.Second
 	}
@@ -343,7 +343,7 @@ func newSSHClientConfig(user, authMethod, keyPath, password string, timeout int)
 			},
 		},
 		BannerCallback: func(message string) error {
-			log.Info().Str("message", message).Msg("SSH Banner")
+			fmt.Println(message)
 			return nil
 		},
 	}, nil
@@ -354,35 +354,53 @@ func (c *Client) Connect(ctx context.Context) error {
 	// 启动保活和重连 goroutine
 	go c.keepAliveAndReconnect(ctx)
 
+	log.Info().Str("host", c.host).Int("port", c.port).Msg("Connecting to SSH server")
+
 	return c.connectWithRetry(ctx, fmt.Sprintf("%s:%d", c.host, c.port))
 }
 
-// connectWithRetry 带重试的连接实现
+// connectWithRetry 带无限重试和超时检测的连接实现
 func (c *Client) connectWithRetry(ctx context.Context, addr string) error {
-	var lastErr error
 	retries := 0
+	for {
+		log.Info().Str("addr", addr).Msg("Attempting SSH connection")
 
-	for c.maxRetries < 0 || retries <= c.maxRetries {
-		err := c.connectWithTimeout(ctx, addr)
-		if err == nil {
+		connectChan := make(chan bool, 1)
+		errChan := make(chan error, 1)
+
+		go func() {
+			client, dialErr := ssh.Dial("tcp", addr, c.sshClientConfig)
+			if dialErr != nil {
+				log.Error().Err(dialErr).Msg("SSH connection failed")
+				errChan <- fmt.Errorf("failed to create ssh client conn: %w", dialErr)
+				return
+			}
+			c.client = client
+			connectChan <- true
+		}()
+
+		// 等待连接结果或超时
+		select {
+		case <-ctx.Done():
+			log.Info().Str("host", c.host).Int("port", c.port).Msg("Context cancelled, stopping connection retry")
+			return fmt.Errorf("context cancelled during connection retry")
+		case err := <-errChan:
+			retries++
+			log.Error().Err(err).Int("retries", retries).Str("reconnectDelay", c.reconnectDelay.String()).Msg("Connection attempt failed")
+
+			select {
+			case <-ctx.Done():
+				log.Info().Str("host", c.host).Int("port", c.port).Msg("Context cancelled, stopping connection retry")
+				return fmt.Errorf("context cancelled during connection retry: %w", err)
+			case <-time.After(c.reconnectDelay):
+				continue
+			}
+		case <-connectChan:
+			log.Info().Str("addr", addr).Msg("Successfully connected")
 			c.isConnected.Store(true)
 			return nil
 		}
-
-		lastErr = err
-		retries++
-
-		log.Error().Err(err).Int("retries", retries).Str("reconnectDelay", c.reconnectDelay.String()).Msg("Connection attempt failed")
-
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("context cancelled during connection retry: %w", lastErr)
-		case <-time.After(c.reconnectDelay):
-			continue
-		}
 	}
-
-	return fmt.Errorf("failed to connect after %d retries: %w", retries, lastErr)
 }
 
 // keepAliveAndReconnect 保持连接活跃并在断开时重连
@@ -393,15 +411,17 @@ func (c *Client) keepAliveAndReconnect(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			log.Info().Str("host", c.host).Int("port", c.port).Msg("Context cancelled, stopping keep-alive")
 			return
 		case <-ticker.C:
 			if c.client == nil {
 				continue
 			}
 
+			log.Info().Str("host", c.host).Int("port", c.port).Msg("Sending keep-alive message")
+
 			// 发送 keep-alive 消息
-			_, _, err := c.client.SendRequest("keepalive@openssh.com", true, nil)
-			if err != nil {
+			if _, _, err := c.client.SendRequest("keepalive@openssh.com", true, []byte("abc")); err != nil {
 				log.Error().Err(err).Msg("Keep-alive failed")
 				c.isConnected.Store(false)
 
@@ -409,8 +429,7 @@ func (c *Client) keepAliveAndReconnect(ctx context.Context) {
 				c.client.Close()
 
 				// 尝试重新连接
-				addr := fmt.Sprintf("%s:%d", c.host, c.port)
-				if err := c.connectWithRetry(ctx, addr); err != nil {
+				if err := c.connectWithRetry(ctx, fmt.Sprintf("%s:%d", c.host, c.port)); err != nil {
 					log.Error().Err(err).Msg("Failed to reconnect")
 					continue
 				}
@@ -454,35 +473,6 @@ func (c *Client) reestablishTunnels(ctx context.Context) {
 				log.Error().Err(err).Str("tunnel", fmt.Sprintf("%s:%d -> %s:%d", tunnel.LocalHost, tunnel.LocalPort, tunnel.RemoteHost, tunnel.RemotePort)).Msg("Failed to reestablish tunnel")
 			}
 		}
-	}
-}
-
-// connectWithTimeout 带超时的连接实现
-func (c *Client) connectWithTimeout(ctx context.Context, addr string) error {
-	var err error
-	connectChan := make(chan bool, 1)
-	errChan := make(chan error, 1)
-
-	go func() {
-		log.Info().Str("addr", addr).Msg("Attempting SSH connection")
-		client, dialErr := ssh.Dial("tcp", addr, c.sshClientConfig)
-		if dialErr != nil {
-			log.Error().Err(dialErr).Msg("SSH connection failed")
-			errChan <- fmt.Errorf("failed to create ssh client conn: %w", dialErr)
-			return
-		}
-		c.client = client
-		connectChan <- true
-	}()
-
-	select {
-	case <-ctx.Done():
-		return fmt.Errorf("connection timeout after %d seconds", c.timeout*2)
-	case err = <-errChan:
-		return err
-	case <-connectChan:
-		log.Info().Str("addr", addr).Msg("Successfully connected")
-		return nil
 	}
 }
 

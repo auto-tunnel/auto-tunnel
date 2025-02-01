@@ -13,7 +13,6 @@ import (
 // Manager 管理多个隧道的生命周期
 type Manager struct {
 	config  *config.Config
-	wg      sync.WaitGroup
 	tunnels []*Tunnel
 }
 
@@ -22,7 +21,6 @@ func NewManager(cfg *config.Config) *Manager {
 	return &Manager{
 		config:  cfg,
 		tunnels: make([]*Tunnel, 0),
-		wg:      sync.WaitGroup{},
 	}
 }
 
@@ -34,19 +32,12 @@ func (m *Manager) Start(ctx context.Context) error {
 			tunnel := NewTunnel(server, tunnelCfg)
 			m.tunnels = append(m.tunnels, tunnel)
 
-			m.wg.Add(1)
-			go m.runTunnel(ctx, tunnel)
+			if err := tunnel.Start(ctx); err != nil {
+				log.Error().Err(err).Str("tunnel", tunnel.Name()).Msg("Failed to start tunnel")
+			}
 		}
 	}
 	return nil
-}
-
-// runTunnel 在独立的 goroutine 中运行隧道
-func (m *Manager) runTunnel(ctx context.Context, t *Tunnel) {
-	defer m.wg.Done()
-	if err := t.Start(ctx); err != nil {
-		log.Error().Err(err).Str("tunnel", t.Name()).Msg("Failed to start tunnel")
-	}
 }
 
 // Stop 停止所有隧道

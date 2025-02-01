@@ -72,7 +72,7 @@ jobs:
           ls -la build/
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: packages
           path: |
@@ -115,7 +115,7 @@ jobs:
             '
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: rpm-packages
           path: build/rpm-amd64/RPMS/*/*.rpm
@@ -128,7 +128,7 @@ jobs:
       packages: write
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           path: artifacts
 

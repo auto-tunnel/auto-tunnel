@@ -3,8 +3,9 @@ package tunnel
 import (
 	"context"
 	"fmt"
-	"log"
 	"time"
+
+	"github.com/rs/zerolog/log"
 
 	"tunnel/internal/config"
 	"tunnel/pkg/sshclient"
@@ -97,7 +98,8 @@ func (t *Tunnel) setupTunnel(ctx context.Context) error {
 
 // handleError 处理错误并决定是否重试
 func (t *Tunnel) handleError(ctx context.Context, err error) bool {
-	log.Printf("Tunnel %s connection failed: %v", t.Name(), err)
+	log.Warn().Err(err).Str("tunnel", t.Name()).Msg("Tunnel connection failed")
+
 	select {
 	case <-ctx.Done():
 		return false
@@ -108,7 +110,8 @@ func (t *Tunnel) handleError(ctx context.Context, err error) bool {
 
 // handleShutdown 处理隧道关闭
 func (t *Tunnel) handleShutdown() error {
-	log.Printf("Tunnel %s stopping due to context cancellation", t.Name())
+	log.Info().Str("tunnel", t.Name()).Msg("Tunnel stopping due to context cancellation")
+
 	if t.client != nil {
 		t.client.Close()
 	}

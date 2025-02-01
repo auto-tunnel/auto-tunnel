@@ -3,41 +3,24 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
+	"path"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"tunnel/internal/config"
 	"tunnel/internal/tunnel"
 
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"github.com/spf13/pflag"
 )
 
 const (
 	defaultConfigName = "config.yaml"
 )
-
-// 获取可能的配置文件路径
-func getConfigPaths(configPath string) []string {
-	// 如果通过命令行指定了配置文件，则只使用指定的路径
-	if configPath != "" {
-		return []string{configPath}
-	}
-
-	// 默认的配置文件搜索路径
-	paths := []string{
-		// 当前目录
-		filepath.Join(".", defaultConfigName),
-		// /etc/auto-tunnel/
-		filepath.Join("/etc/auto-tunnel", defaultConfigName),
-		// 用户主目录
-		filepath.Join(os.Getenv("HOME"), ".auto-tunnel", defaultConfigName),
-	}
-
-	return paths
-}
 
 // 查找第一个存在的配置文件
 func findConfigFile(paths []string) (string, error) {
@@ -51,19 +34,31 @@ func findConfigFile(paths []string) (string, error) {
 }
 
 func main() {
+	InitLog()
+
 	// 使用 pflag 支持更多的命令行参数格式
 	var configPath string
 	pflag.StringVarP(&configPath, "config", "c", "", "Path to configuration file")
 	pflag.Parse()
 
 	// 获取所有可能的配置文件路径
-	configPaths := getConfigPaths(configPath)
+	var configPaths []string
+	configPaths = append(configPaths, configPath)
+	configPaths = append(configPaths, filepath.Join(".", defaultConfigName))
+	configPaths = append(configPaths, filepath.Join("/etc/auto-tunnel", defaultConfigName))
+	configPaths = append(configPaths, filepath.Join(os.Getenv("HOME"), ".auto-tunnel", defaultConfigName))
 
 	// 查找可用的配置文件
-	foundConfigPath, err := findConfigFile(configPaths)
-	if err != nil {
-		log.Fatalf("Failed to find config file: %v", err)
+	var foundConfigPath string
+	for _, path := range configPaths {
+		if _, err := os.Stat(path); err == nil {
+			log.Printf("Using config file: %s", path)
+			foundConfigPath = path
+			break
+		}
 	}
+
+	log.Printf("foundConfigPath: %v", foundConfigPath)
 
 	// 创建带取消的 context
 	ctx, cancel := context.WithCancel(context.Background())
@@ -72,7 +67,7 @@ func main() {
 	// 加载配置
 	cfg, err := config.LoadConfig(foundConfigPath)
 	if err != nil {
-		log.Fatalf("Failed to load config: %v", err)
+		log.Fatal().Err(err).Msg("Failed to load config")
 	}
 
 	// 创建隧道管理器
@@ -80,7 +75,7 @@ func main() {
 
 	// 启动所有隧道
 	if err := manager.Start(ctx); err != nil {
-		log.Fatalf("Failed to start tunnel manager: %v", err)
+		log.Fatal().Err(err).Msg("Failed to start tunnel manager")
 	}
 
 	// 等待信号以优雅退出
@@ -93,4 +88,16 @@ func main() {
 
 	// 优雅关闭
 	manager.Stop()
+}
+
+func InitLog() {
+	outer := zerolog.ConsoleWriter{
+		Out:        os.Stderr,
+		TimeFormat: time.RFC3339,
+		FormatCaller: func(i interface{}) string {
+			_, f := path.Split(i.(string))
+			return "[" + fmt.Sprintf("%-20s", f) + "]"
+		},
+	}
+	log.Logger = zerolog.New(zerolog.MultiLevelWriter(outer)).With().Caller().Timestamp().Stack().Logger()
 }

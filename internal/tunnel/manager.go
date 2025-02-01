@@ -2,18 +2,19 @@ package tunnel
 
 import (
 	"context"
-	"log"
 	"sync"
 	"time"
 
 	"tunnel/internal/config"
+
+	"github.com/rs/zerolog/log"
 )
 
 // Manager 管理多个隧道的生命周期
 type Manager struct {
 	config  *config.Config
-	tunnels []*Tunnel
 	wg      sync.WaitGroup
+	tunnels []*Tunnel
 }
 
 // NewManager 创建新的隧道管理器
@@ -21,6 +22,7 @@ func NewManager(cfg *config.Config) *Manager {
 	return &Manager{
 		config:  cfg,
 		tunnels: make([]*Tunnel, 0),
+		wg:      sync.WaitGroup{},
 	}
 }
 
@@ -43,13 +45,13 @@ func (m *Manager) Start(ctx context.Context) error {
 func (m *Manager) runTunnel(ctx context.Context, t *Tunnel) {
 	defer m.wg.Done()
 	if err := t.Start(ctx); err != nil {
-		log.Printf("Failed to start tunnel %s: %v", t.Name(), err)
+		log.Error().Err(err).Str("tunnel", t.Name()).Msg("Failed to start tunnel")
 	}
 }
 
 // Stop 停止所有隧道
 func (m *Manager) Stop() {
-	log.Println("Waiting for all tunnels to close...")
+	log.Info().Msg("Waiting for all tunnels to close...")
 
 	// 创建等待组，用于等待所有隧道关闭
 	var wg sync.WaitGroup
@@ -70,8 +72,8 @@ func (m *Manager) Stop() {
 
 	select {
 	case <-done:
-		log.Println("All tunnels closed")
+		log.Info().Msg("All tunnels closed")
 	case <-time.After(5 * time.Second):
-		log.Println("Force closing tunnels after timeout")
+		log.Error().Msg("Force closing tunnels after timeout")
 	}
 }

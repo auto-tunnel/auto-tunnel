@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -15,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/rs/zerolog/log"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -32,16 +32,16 @@ type TunnelConfig struct {
 
 // Client SSH 客户端结构
 type Client struct {
-	config         *ssh.ClientConfig
-	client         *ssh.Client
-	host           string
-	port           int
-	timeout        int
-	listeners      []net.Listener
-	mu             sync.Mutex
-	reconnectDelay time.Duration
-	maxRetries     int
-	isConnected    atomic.Bool
+	sshClientConfig *ssh.ClientConfig
+	client          *ssh.Client
+	host            string
+	port            int
+	timeout         int
+	listeners       []net.Listener
+	mu              sync.Mutex
+	reconnectDelay  time.Duration
+	maxRetries      int
+	isConnected     atomic.Bool
 	// 添加隧道配置存储
 	tunnels []TunnelConfig
 }
@@ -72,7 +72,7 @@ func loadSSHConfig(host string) (*SSHConfig, error) {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
-		log.Printf("failed to read ssh config file: %v", err)
+		log.Error().Err(err).Msg("failed to read ssh config file")
 		return nil, err
 	}
 
@@ -183,7 +183,7 @@ func matchHost(target, pattern string) bool {
 
 // NewClient 创建新的 SSH 客户端
 func NewClient(host string, port int, user string, authMethod string, keyPath string, password string, timeout int) (*Client, error) {
-	log.Printf("Initial config: host=%s, port=%d, user=%s, authMethod=%s", host, port, user, authMethod)
+	log.Info().Str("host", host).Int("port", port).Str("user", user).Str("authMethod", authMethod).Msg("Initial config")
 
 	// 设置默认值
 	if port == 0 {
@@ -193,7 +193,7 @@ func NewClient(host string, port int, user string, authMethod string, keyPath st
 	// 尝试从SSH配置文件加载配置
 	sshConfig, err := loadSSHConfig(host)
 	if err != nil {
-		log.Printf("failed to load ssh config: %v", err)
+		log.Error().Err(err).Msg("failed to load ssh config")
 	}
 
 	// 处理用户名优先级：
@@ -202,20 +202,20 @@ func NewClient(host string, port int, user string, authMethod string, keyPath st
 	// 3. 系统环境变量
 	if user == "" && sshConfig != nil && sshConfig.User != "" {
 		user = sshConfig.User
-		log.Printf("Using user from SSH config: %s", user)
+		log.Info().Str("user", user).Msg("Using user from SSH config")
 	}
 	if user == "" {
 		user = os.Getenv("USER")
 		if user == "" {
 			user = os.Getenv("USERNAME") // 为Windows系统
 		}
-		log.Printf("Using system user: %s", user)
+		log.Info().Str("user", user).Msg("Using system user")
 	}
 
 	// 处理主机名和端口
 	if sshConfig != nil {
 		if sshConfig.HostName != "" && host == sshConfig.Host {
-			log.Printf("Using SSH config: %s -> %s", host, sshConfig.HostName)
+			log.Info().Str("host", host).Str("sshConfig.HostName", sshConfig.HostName).Msg("Using SSH config")
 			host = sshConfig.HostName
 		}
 		if port == 22 && sshConfig.Port > 0 {
@@ -223,72 +223,65 @@ func NewClient(host string, port int, user string, authMethod string, keyPath st
 		}
 	}
 
-	// 处理认证方法
-	if authMethod != "" {
-		// 如果明确指定了认证方法，就使用指定的方法
-		log.Printf("Using specified auth method: %s", authMethod)
-		switch authMethod {
-		case "key":
-			if keyPath == "" && sshConfig != nil && sshConfig.IdentityFile != "" {
-				keyPath = sshConfig.IdentityFile
-				log.Printf("Using identity file from SSH config: %s", keyPath)
-			}
-		case "password":
-			if password == "" {
-				return nil, fmt.Errorf("password is required when auth_method is set to password")
-			}
-		default:
-			return nil, fmt.Errorf("unsupported auth method: %s", authMethod)
-		}
-	} else {
-		// 如果没有指定认证方法，按优先级尝试：
-		// 1. 如果指定了key_path，使用密钥认证
-		// 2. 如果指定了password，使用密码认证
-		// 3. 如果SSH配置中有IdentityFile，使用密钥认证
-		if keyPath != "" {
+	// 确定认证方法和相关参数
+	if authMethod == "" {
+		// 根据提供的参数自动确定认证方法
+		switch {
+		case keyPath != "":
 			authMethod = "key"
-			log.Printf("Using key authentication with specified key path: %s", keyPath)
-		} else if password != "" {
+			log.Info().Str("keyPath", keyPath).Msg("Using key authentication with specified key path")
+		case password != "":
 			authMethod = "password"
-			log.Printf("Using password authentication")
-		} else if sshConfig != nil && sshConfig.IdentityFile != "" {
+			log.Info().Msg("Using password authentication")
+		case sshConfig != nil && sshConfig.IdentityFile != "":
 			authMethod = "key"
 			keyPath = sshConfig.IdentityFile
-			log.Printf("Using identity file from SSH config: %s", keyPath)
-		} else {
+			log.Info().Str("keyPath", keyPath).Msg("Using identity file from SSH config")
+		default:
 			return nil, fmt.Errorf("no authentication method available: please provide either key_path or password")
 		}
 	}
 
-	// 验证认证方法的必要参数
-	if authMethod == "key" && keyPath == "" {
-		return nil, fmt.Errorf("key_path is required for key authentication")
-	}
-	if authMethod == "password" && password == "" {
-		return nil, fmt.Errorf("password is required for password authentication")
+	// 根据认证方法验证和补充参数
+	switch authMethod {
+	case "key":
+		if keyPath == "" {
+			if sshConfig != nil && sshConfig.IdentityFile != "" {
+				keyPath = sshConfig.IdentityFile
+				log.Info().Str("keyPath", keyPath).Msg("Using identity file from SSH config")
+			} else {
+				return nil, fmt.Errorf("key_path is required for key authentication")
+			}
+		}
+	case "password":
+		if password == "" {
+			return nil, fmt.Errorf("password is required for password authentication")
+		}
+	default:
+		return nil, fmt.Errorf("unsupported auth method: %s", authMethod)
 	}
 
-	config, err := createSSHConfig(user, authMethod, keyPath, password, timeout)
+	sshClientConfig, err := newSSHClientConfig(user, authMethod, keyPath, password, timeout)
 	if err != nil {
 		return nil, err
 	}
 
 	return &Client{
-		config:         config,
-		host:           host,
-		port:           port,
-		timeout:        timeout,
-		listeners:      make([]net.Listener, 0),
-		reconnectDelay: 5 * time.Second, // 重连延迟5秒
-		maxRetries:     -1,              // -1表示无限重试
+		sshClientConfig: sshClientConfig,
+		host:            host,
+		port:            port,
+		timeout:         timeout,
+		listeners:       make([]net.Listener, 0),
+		reconnectDelay:  5 * time.Second, // 重连延迟5秒
+		maxRetries:      -1,              // -1表示无限重试
 	}, nil
 }
 
-// createSSHConfig 创建 SSH 客户端配置
-func createSSHConfig(user, authMethod, keyPath, password string, timeout int) (*ssh.ClientConfig, error) {
+// newSSHClientConfig 创建 SSH 客户端配置
+func newSSHClientConfig(user, authMethod, keyPath, password string, timeout int) (*ssh.ClientConfig, error) {
 	var auths []ssh.AuthMethod
 
-	log.Printf("Creating SSH config: user=%s, authMethod=%s, keyPath=%s", user, authMethod, keyPath)
+	log.Info().Str("user", user).Str("authMethod", authMethod).Str("keyPath", keyPath).Msg("Creating SSH config")
 
 	switch authMethod {
 	case "key":
@@ -297,23 +290,23 @@ func createSSHConfig(user, authMethod, keyPath, password string, timeout int) (*
 		}
 		expandedPath, err := expandPath(keyPath)
 		if err != nil {
-			log.Printf("Failed to expand key path %s: %v", keyPath, err)
+			log.Error().Err(err).Str("keyPath", keyPath).Msg("Failed to expand key path")
 			return nil, fmt.Errorf("failed to expand key path: %w", err)
 		}
-		log.Printf("Using expanded key path: %s", expandedPath)
+		log.Info().Str("expandedPath", expandedPath).Msg("Using expanded key path")
 
 		buffer, err := os.ReadFile(expandedPath)
 		if err != nil {
-			log.Printf("Failed to read key file %s: %v", expandedPath, err)
+			log.Error().Err(err).Str("expandedPath", expandedPath).Msg("Failed to read key file")
 			return nil, fmt.Errorf("failed to read key file: %w", err)
 		}
 
 		key, err := ssh.ParsePrivateKey(buffer)
 		if err != nil {
-			log.Printf("Failed to parse private key %s: %v", expandedPath, err)
+			log.Error().Err(err).Str("expandedPath", expandedPath).Msg("Failed to parse private key")
 			return nil, fmt.Errorf("failed to parse private key: %w", err)
 		}
-		log.Printf("Successfully loaded private key from %s", expandedPath)
+		log.Info().Str("expandedPath", expandedPath).Msg("Successfully loaded private key")
 
 		auths = append(auths, ssh.PublicKeys(key))
 	case "password":
@@ -321,7 +314,7 @@ func createSSHConfig(user, authMethod, keyPath, password string, timeout int) (*
 			return nil, fmt.Errorf("password is required for password authentication")
 		}
 		auths = append(auths, ssh.Password(password))
-		log.Printf("Using password authentication")
+		log.Info().Msg("Using password authentication")
 	default:
 		return nil, fmt.Errorf("unsupported auth method: %s", authMethod)
 	}
@@ -350,7 +343,7 @@ func createSSHConfig(user, authMethod, keyPath, password string, timeout int) (*
 			},
 		},
 		BannerCallback: func(message string) error {
-			log.Printf("SSH Banner: %s", message)
+			log.Info().Str("message", message).Msg("SSH Banner")
 			return nil
 		},
 	}, nil
@@ -381,8 +374,7 @@ func (c *Client) connectWithRetry(ctx context.Context, addr string) error {
 		lastErr = err
 		retries++
 
-		log.Printf("Connection attempt %d failed: %v. Retrying in %v...",
-			retries, err, c.reconnectDelay)
+		log.Error().Err(err).Int("retries", retries).Str("reconnectDelay", c.reconnectDelay.String()).Msg("Connection attempt failed")
 
 		select {
 		case <-ctx.Done():
@@ -412,7 +404,7 @@ func (c *Client) keepAliveAndReconnect(ctx context.Context) {
 			// 发送 keep-alive 消息
 			_, _, err := c.client.SendRequest("keepalive@openssh.com", true, nil)
 			if err != nil {
-				log.Printf("Keep-alive failed: %v", err)
+				log.Error().Err(err).Msg("Keep-alive failed")
 				c.isConnected.Store(false)
 
 				// 关闭旧连接
@@ -421,7 +413,7 @@ func (c *Client) keepAliveAndReconnect(ctx context.Context) {
 				// 尝试重新连接
 				addr := fmt.Sprintf("%s:%d", c.host, c.port)
 				if err := c.connectWithRetry(ctx, addr); err != nil {
-					log.Printf("Failed to reconnect: %v", err)
+					log.Error().Err(err).Msg("Failed to reconnect")
 					continue
 				}
 
@@ -451,7 +443,7 @@ func (c *Client) reestablishTunnels(ctx context.Context) {
 	for _, tunnel := range tunnels {
 		select {
 		case <-ctx.Done():
-			log.Printf("Context cancelled while reestablishing tunnels")
+			log.Error().Msg("Context cancelled while reestablishing tunnels")
 			return
 		default:
 			var err error
@@ -461,8 +453,7 @@ func (c *Client) reestablishTunnels(ctx context.Context) {
 				err = c.LocalToRemote(ctx, tunnel.LocalHost, tunnel.LocalPort, tunnel.RemoteHost, tunnel.RemotePort)
 			}
 			if err != nil {
-				log.Printf("Failed to reestablish tunnel %s:%d -> %s:%d: %v",
-					tunnel.LocalHost, tunnel.LocalPort, tunnel.RemoteHost, tunnel.RemotePort, err)
+				log.Error().Err(err).Str("tunnel", fmt.Sprintf("%s:%d -> %s:%d", tunnel.LocalHost, tunnel.LocalPort, tunnel.RemoteHost, tunnel.RemotePort)).Msg("Failed to reestablish tunnel")
 			}
 		}
 	}
@@ -475,10 +466,10 @@ func (c *Client) connectWithTimeout(ctx context.Context, addr string) error {
 	errChan := make(chan error, 1)
 
 	go func() {
-		log.Printf("Attempting SSH connection to %s...", addr)
-		client, dialErr := ssh.Dial("tcp", addr, c.config)
+		log.Info().Str("addr", addr).Msg("Attempting SSH connection")
+		client, dialErr := ssh.Dial("tcp", addr, c.sshClientConfig)
 		if dialErr != nil {
-			log.Printf("SSH connection failed: %v", dialErr)
+			log.Error().Err(dialErr).Msg("SSH connection failed")
 			errChan <- fmt.Errorf("failed to create ssh client conn: %w", dialErr)
 			return
 		}
@@ -492,7 +483,7 @@ func (c *Client) connectWithTimeout(ctx context.Context, addr string) error {
 	case err = <-errChan:
 		return err
 	case <-connectChan:
-		log.Printf("Successfully connected to %s", addr)
+		log.Info().Str("addr", addr).Msg("Successfully connected")
 		return nil
 	}
 }
@@ -530,7 +521,7 @@ func (c *Client) LocalToRemote(ctx context.Context, localHost string, localPort 
 
 	// 使用 RequestRemotePort 来请求端口转发
 	addr := fmt.Sprintf("%s:%d", remoteHost, remotePort)
-	log.Printf("Requesting remote port forward for %s", addr)
+	log.Info().Str("addr", addr).Msg("Requesting remote port forward")
 
 	// 请求远程端口转发
 	ln, err := c.client.ListenTCP(&net.TCPAddr{
@@ -542,8 +533,7 @@ func (c *Client) LocalToRemote(ctx context.Context, localHost string, localPort 
 	}
 	defer ln.Close()
 
-	log.Printf("Successfully created listener on remote %s, forwarding to %s:%d",
-		addr, localHost, localPort)
+	log.Info().Str("addr", addr).Str("localHost", localHost).Int("localPort", localPort).Msg("Successfully created listener on remote")
 
 	var connCount int32
 	var lastLogTime time.Time
@@ -568,37 +558,35 @@ func (c *Client) LocalToRemote(ctx context.Context, localHost string, localPort 
 	// 主循环
 	for {
 		if time.Since(lastLogTime) > 30*time.Second {
-			log.Printf("Waiting for connection on remote %s...", addr)
+			log.Info().Str("addr", addr).Msg("Waiting for connection on remote")
 			lastLogTime = time.Now()
 		}
 
 		select {
 		case <-ctx.Done():
-			log.Printf("Context cancelled, closing remote listener on %s", addr)
+			log.Info().Str("addr", addr).Msg("Context cancelled, closing remote listener")
 			return nil
 		case err := <-errChan:
-			log.Printf("Accept error: %v", err)
+			log.Error().Err(err).Str("addr", addr).Msg("Accept error")
 			return err
 		case remote := <-acceptChan:
-			log.Printf("Accepted remote connection from %s", remote.RemoteAddr().String())
+			log.Info().Str("addr", addr).Str("remote", remote.RemoteAddr().String()).Msg("Accepted remote connection")
 
 			connID := atomic.AddInt32(&connCount, 1)
 			go func(remote net.Conn) {
 				localAddr := fmt.Sprintf("%s:%d", localHost, localPort)
 				remoteAddr := remote.RemoteAddr().String()
-				log.Printf("[Conn-%d] New connection from %s, forwarding to %s",
-					connID, remoteAddr, localAddr)
+				log.Info().Int32("connID", connID).Str("remoteAddr", remoteAddr).Str("localAddr", localAddr).Msg("New connection")
 
 				defer func() {
 					remote.Close()
-					log.Printf("[Conn-%d] Connection closed", connID)
+					log.Info().Int32("connID", connID).Msg("Connection closed")
 				}()
 
 				// 连接到本地目标地址
 				local, err := net.Dial("tcp", localAddr)
 				if err != nil {
-					log.Printf("[Conn-%d] Failed to connect to %s: %v",
-						connID, localAddr, err)
+					log.Error().Err(err).Int32("connID", connID).Str("localAddr", localAddr).Msg("Failed to connect to local")
 					return
 				}
 				defer local.Close()
@@ -607,12 +595,12 @@ func (c *Client) LocalToRemote(ctx context.Context, localHost string, localPort 
 				done := make(chan struct{}, 2)
 				go func() {
 					n, err := io.Copy(local, remote)
-					log.Printf("[Conn-%d] Copied %d bytes from remote to local, err: %v", connID, n, err)
+					log.Info().Int32("connID", connID).Int64("n", n).Err(err).Msg("Copied from remote to local")
 					done <- struct{}{}
 				}()
 				go func() {
 					n, err := io.Copy(remote, local)
-					log.Printf("[Conn-%d] Copied %d bytes from local to remote, err: %v", connID, n, err)
+					log.Info().Int32("connID", connID).Int64("n", n).Err(err).Msg("Copied from local to remote")
 					done <- struct{}{}
 				}()
 
@@ -642,11 +630,11 @@ func (c *Client) createTunnel(ctx context.Context, localHost string, localPort i
 		localHost = "127.0.0.1"
 	}
 
-	tunnelType := "local to remote"
+	tunnelType := "local_to_remote"
 	if isRemote {
-		tunnelType = "remote to local"
+		tunnelType = "remote_to_local"
 	}
-	log.Printf("Creating %s tunnel: %s:%d -> %s:%d", tunnelType, localHost, localPort, remoteHost, remotePort)
+	log.Info().Str("tunnelType", tunnelType).Str("localHost", localHost).Int("localPort", localPort).Str("remoteHost", remoteHost).Int("remotePort", remotePort).Msg("Creating tunnel")
 
 	var lastErr error
 	for {
@@ -655,10 +643,9 @@ func (c *Client) createTunnel(ctx context.Context, localHost string, localPort i
 			return fmt.Errorf("failed to create %s tunnel listener: %w", tunnelType, err)
 		}
 
-		err = c.handleConnections(ctx, listener, remoteHost, remotePort)
-		if err != nil {
+		if err := c.handleConnections(ctx, listener, remoteHost, remotePort); err != nil {
 			lastErr = err
-			log.Printf("%s tunnel error: %v, retrying...", tunnelType, err)
+			log.Error().Err(err).Str("tunnelType", tunnelType).Msg("Tunnel error")
 			listener.Close()
 
 			select {
@@ -673,28 +660,25 @@ func (c *Client) createTunnel(ctx context.Context, localHost string, localPort i
 	}
 }
 
-// 工具函数
-// -----------------------------
-
-func (c *Client) addListener(l net.Listener) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.listeners = append(c.listeners, l)
-}
-
 func (c *Client) createListener(host string, port int) (net.Listener, error) {
+	log.Info().Str("host", host).Int("port", port).Msg("Creating listener")
+
 	listener, err := net.Listen("tcp", fmt.Sprintf("%s:%d", host, port))
 	if err != nil {
 		return nil, fmt.Errorf("failed to listen on %s:%d: %w", host, port, err)
 	}
-	c.addListener(listener)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.listeners = append(c.listeners, listener)
+
 	return listener, nil
 }
 
 func (c *Client) handleConnections(ctx context.Context, listener net.Listener, remoteHost string, remotePort int) error {
 	go func() {
 		<-ctx.Done()
-		log.Printf("Closing listener on port %d", c.port)
+		log.Info().Int("port", c.port).Msg("Closing listener")
 		listener.Close()
 	}()
 
@@ -713,7 +697,7 @@ func (c *Client) handleConnections(ctx context.Context, listener net.Listener, r
 				if err == net.ErrClosed {
 					return nil
 				}
-				log.Printf("failed to accept local connection: %v", err)
+				log.Error().Err(err).Msg("failed to accept local connection")
 				return err
 			}
 
@@ -722,16 +706,16 @@ func (c *Client) handleConnections(ctx context.Context, listener net.Listener, r
 			go func(local net.Conn) {
 				remoteAddr := fmt.Sprintf("%s:%d", remoteHost, remotePort)
 				localAddr := local.RemoteAddr().String()
-				log.Printf("[Conn-%d] New connection from %s to remote %s", connID, localAddr, remoteAddr)
+				log.Info().Int32("connID", connID).Str("localAddr", localAddr).Str("remoteAddr", remoteAddr).Msg("New connection")
 
 				defer func() {
 					local.Close()
-					log.Printf("[Conn-%d] Connection closed from %s to remote %s", connID, localAddr, remoteAddr)
+					log.Info().Int32("connID", connID).Str("localAddr", localAddr).Str("remoteAddr", remoteAddr).Msg("Connection closed")
 				}()
 
 				remote, err := c.client.Dial("tcp", remoteAddr)
 				if err != nil {
-					log.Printf("[Conn-%d] Failed to dial remote %s: %v", connID, remoteAddr, err)
+					log.Error().Err(err).Int32("connID", connID).Str("remoteAddr", remoteAddr).Msg("Failed to dial remote")
 					return
 				}
 				defer remote.Close()

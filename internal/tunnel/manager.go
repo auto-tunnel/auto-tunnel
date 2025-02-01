@@ -59,7 +59,9 @@ func (m *Manager) Stop() {
 		wg.Add(1)
 		go func(t *Tunnel) {
 			defer wg.Done()
-			t.Close()
+			if t.client != nil {
+				t.client.Close()
+			}
 		}(tunnel)
 	}
 

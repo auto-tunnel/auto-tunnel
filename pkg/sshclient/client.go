@@ -351,12 +351,10 @@ func newSSHClientConfig(user, authMethod, keyPath, password string, timeout int)
 
 // Connect 连接到 SSH 服务器
 func (c *Client) Connect(ctx context.Context) error {
-	addr := fmt.Sprintf("%s:%d", c.host, c.port)
-
 	// 启动保活和重连 goroutine
 	go c.keepAliveAndReconnect(ctx)
 
-	return c.connectWithRetry(ctx, addr)
+	return c.connectWithRetry(ctx, fmt.Sprintf("%s:%d", c.host, c.port))
 }
 
 // connectWithRetry 带重试的连接实现
@@ -511,13 +509,15 @@ func (c *Client) Close() error {
 // 在远程服务器上监听端口，将流量转发到本地指定的地址
 func (c *Client) LocalToRemote(ctx context.Context, localHost string, localPort int, remoteHost string, remotePort int) error {
 	// 保存隧道配置
-	c.addTunnel(TunnelConfig{
+	c.mu.Lock()
+	c.tunnels = append(c.tunnels, TunnelConfig{
 		LocalHost:  localHost,
 		LocalPort:  localPort,
 		RemoteHost: remoteHost,
 		RemotePort: remotePort,
 		IsRemote:   false,
 	})
+	c.mu.Unlock()
 
 	// 使用 RequestRemotePort 来请求端口转发
 	addr := fmt.Sprintf("%s:%d", remoteHost, remotePort)
@@ -613,13 +613,15 @@ func (c *Client) LocalToRemote(ctx context.Context, localHost string, localPort 
 // RemoteToLocal 远程端口转发到本地
 func (c *Client) RemoteToLocal(ctx context.Context, localHost string, localPort int, remoteHost string, remotePort int) error {
 	// 保存隧道配置
-	c.addTunnel(TunnelConfig{
+	c.mu.Lock()
+	c.tunnels = append(c.tunnels, TunnelConfig{
 		LocalHost:  localHost,
 		LocalPort:  localPort,
 		RemoteHost: remoteHost,
 		RemotePort: remotePort,
 		IsRemote:   true,
 	})
+	c.mu.Unlock()
 
 	return c.createTunnel(ctx, localHost, localPort, remoteHost, remotePort, true)
 }
@@ -730,13 +732,15 @@ func (c *Client) proxyConn(ctx context.Context, conn1, conn2 net.Conn, connID in
 	done := make(chan struct{}, 2)
 	var bytesIn, bytesOut int64
 
-	copyData := func(dst, src net.Conn, byteCount *int64) {
+	go func() {
 		defer func() { done <- struct{}{} }()
-		*byteCount = copyDataWithCount(dst, src)
-	}
+		bytesIn, _ = io.Copy(conn1, conn2)
+	}()
 
-	go copyData(conn1, conn2, &bytesIn)
-	go copyData(conn2, conn1, &bytesOut)
+	go func() {
+		defer func() { done <- struct{}{} }()
+		bytesOut, _ = io.Copy(conn2, conn1)
+	}()
 
 	// 设置超时检测
 	go func() {
@@ -763,33 +767,7 @@ func (c *Client) proxyConn(ctx context.Context, conn1, conn2 net.Conn, connID in
 		conn1.Close()
 		conn2.Close()
 	case <-done:
-		log.Printf("[Conn-%d] Connection finished. Bytes in: %d, Bytes out: %d",
-			connID, bytesIn, bytesOut)
-	}
-}
-
-func copyDataWithCount(dst, src net.Conn) int64 {
-	defer dst.Close()
-	defer src.Close()
-
-	buffer := make([]byte, 32*1024)
-	var total int64
-
-	for {
-		nr, err := src.Read(buffer)
-		if err != nil {
-			return total
-		}
-		if nr > 0 {
-			nw, err := dst.Write(buffer[0:nr])
-			if err != nil {
-				return total
-			}
-			if nw != nr {
-				return total
-			}
-			total += int64(nr)
-		}
+		log.Info().Int32("connID", connID).Int64("bytesIn", bytesIn).Int64("bytesOut", bytesOut).Msg("Connection finished")
 	}
 }
 
@@ -816,33 +794,4 @@ func expandPath(path string) (string, error) {
 	}
 
 	return filepath.Join(home, path[2:]), nil
-}
-
-func publicKeyFile(file string) (ssh.AuthMethod, error) {
-	expandedPath, err := expandPath(file)
-	if err != nil {
-		log.Printf("failed to expand path %s: %v", file, err)
-		return nil, err
-	}
-
-	buffer, err := os.ReadFile(expandedPath)
-	if err != nil {
-		log.Printf("failed to read key file %s: %v", expandedPath, err)
-		return nil, err
-	}
-
-	key, err := ssh.ParsePrivateKey(buffer)
-	if err != nil {
-		log.Printf("failed to parse private key %s: %v", expandedPath, err)
-		return nil, err
-	}
-
-	return ssh.PublicKeys(key), nil
-}
-
-// addTunnel 添加隧道配置
-func (c *Client) addTunnel(config TunnelConfig) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.tunnels = append(c.tunnels, config)
 }

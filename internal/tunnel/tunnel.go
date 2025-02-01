@@ -22,34 +22,47 @@ type Tunnel struct {
 	config     config.TunnelConfig
 	client     *sshclient.Client
 	retryCount int
-	ctx        context.Context
-	cancel     context.CancelFunc
 }
 
 // NewTunnel 创建新的隧道实例
 func NewTunnel(server config.ServerConfig, config config.TunnelConfig) *Tunnel {
-	ctx, cancel := context.WithCancel(context.Background())
-	return &Tunnel{
-		server: server,
-		config: config,
-		ctx:    ctx,
-		cancel: cancel,
-	}
+	return &Tunnel{server: server, config: config}
 }
 
 // Start 启动隧道并保持连接
 func (t *Tunnel) Start(ctx context.Context) error {
-	ctx = t.ctx
+	// 记录启动时间
+	startTime := time.Now()
+	log.Info().Str("tunnel", t.Name()).Msg("Starting tunnel")
 
 	for {
 		select {
 		case <-ctx.Done():
-			return t.handleShutdown()
+			// 收到取消信号,优雅关闭
+			log.Info().Str("tunnel", t.Name()).Str("uptime", time.Since(startTime).String()).Msg("Tunnel stopping due to context cancellation")
+			if t.client != nil {
+				t.client.Close()
+			}
+			return nil
+
 		default:
-			if err := t.connect(ctx); err != nil {
-				if !t.handleError(ctx, err) {
-					return err
+			// 尝试连接
+			err := t.connect(ctx)
+			if err != nil {
+				t.retryCount++
+				log.Warn().Err(err).Str("tunnel", t.Name()).Int("retryCount", t.retryCount).Msg("Tunnel connection failed")
+
+				// 检查是否需要退出
+				select {
+				case <-ctx.Done():
+					return fmt.Errorf("tunnel stopped due to context cancel: %w", err)
+				case <-time.After(retryInterval):
+					// 等待重试间隔后继续
+					continue
 				}
+			} else {
+				// 连接成功,重置重试计数
+				t.retryCount = 0
 			}
 		}
 	}
@@ -57,11 +70,23 @@ func (t *Tunnel) Start(ctx context.Context) error {
 
 // connect 建立隧道连接
 func (t *Tunnel) connect(ctx context.Context) error {
-	timeoutDuration := t.getTimeoutDuration()
+	timeoutDuration := 10 * time.Second
+	if t.server.Timeout > 0 {
+		timeoutDuration = time.Duration(t.server.Timeout) * time.Second
+	}
+
 	timeoutCtx, cancel := context.WithTimeout(ctx, timeoutDuration)
 	defer cancel()
 
-	client, err := t.createSSHClient()
+	client, err := sshclient.NewClient(
+		t.server.Host,
+		t.server.Port,
+		t.server.User,
+		t.server.AuthMethod,
+		t.server.KeyPath,
+		t.server.Password,
+		t.server.Timeout,
+	)
 	if err != nil {
 		return fmt.Errorf("failed to create SSH client: %w", err)
 	}
@@ -96,59 +121,7 @@ func (t *Tunnel) setupTunnel(ctx context.Context) error {
 	return nil
 }
 
-// handleError 处理错误并决定是否重试
-func (t *Tunnel) handleError(ctx context.Context, err error) bool {
-	log.Warn().Err(err).Str("tunnel", t.Name()).Msg("Tunnel connection failed")
-
-	select {
-	case <-ctx.Done():
-		return false
-	case <-time.After(retryInterval):
-		return true
-	}
-}
-
-// handleShutdown 处理隧道关闭
-func (t *Tunnel) handleShutdown() error {
-	log.Info().Str("tunnel", t.Name()).Msg("Tunnel stopping due to context cancellation")
-
-	if t.client != nil {
-		t.client.Close()
-	}
-	return nil
-}
-
-// createSSHClient 创建 SSH 客户端
-func (t *Tunnel) createSSHClient() (*sshclient.Client, error) {
-	return sshclient.NewClient(
-		t.server.Host,
-		t.server.Port,
-		t.server.User,
-		t.server.AuthMethod,
-		t.server.KeyPath,
-		t.server.Password,
-		t.server.Timeout,
-	)
-}
-
-// getTimeoutDuration 获取超时时间
-func (t *Tunnel) getTimeoutDuration() time.Duration {
-	timeoutDuration := 10 * time.Second
-	if t.server.Timeout > 0 {
-		timeoutDuration = time.Duration(t.server.Timeout) * time.Second
-	}
-	return timeoutDuration
-}
-
 // Name 获取隧道名称
 func (t *Tunnel) Name() string {
 	return fmt.Sprintf("%s-%s", t.server.Name, t.config.Name)
-}
-
-// Close 关闭隧道
-func (t *Tunnel) Close() {
-	t.cancel()
-	if t.client != nil {
-		t.client.Close()
-	}
 }

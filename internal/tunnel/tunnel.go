@@ -33,7 +33,6 @@ func (t *Tunnel) Name() string {
 func (t *Tunnel) Start(ctx context.Context) error {
 	// 记录启动时间
 	startTime := time.Now()
-	log.Info().Str("tunnel", t.Name()).Msg("Starting tunnel")
 
 	for {
 		select {

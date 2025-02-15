@@ -29,8 +29,8 @@ type TunnelConfig struct {
 	Type       string `mapstructure:"type"`
 	LocalHost  string `mapstructure:"local_host" default:"127.0.0.1"`
 	LocalPort  int    `mapstructure:"local_port"`
+	RemoteHost string `mapstructure:"remote_host" default:"localhost"`
 	RemotePort int    `mapstructure:"remote_port"`
-	RemoteHost string `mapstructure:"remote_host"`
 }
 
 func LoadConfig(path string) (*Config, error) {

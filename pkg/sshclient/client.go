@@ -183,8 +183,6 @@ func matchHost(target, pattern string) bool {
 
 // NewClient 创建新的 SSH 客户端
 func NewClient(host string, port int, user string, authMethod string, keyPath string, password string, timeout int) (*Client, error) {
-	log.Info().Str("host", host).Int("port", port).Str("user", user).Str("authMethod", authMethod).Msg("Initial config")
-
 	// 设置默认值
 	if port == 0 {
 		port = 22
@@ -202,20 +200,20 @@ func NewClient(host string, port int, user string, authMethod string, keyPath st
 	// 3. 系统环境变量
 	if user == "" && sshConfig != nil && sshConfig.User != "" {
 		user = sshConfig.User
-		log.Info().Str("user", user).Msg("Using user from SSH config")
+		log.Debug().Str("user", user).Msg("Using user from SSH config")
 	}
 	if user == "" {
 		user = os.Getenv("USER")
 		if user == "" {
 			user = os.Getenv("USERNAME") // 为Windows系统
 		}
-		log.Info().Str("user", user).Msg("Using system user")
+		log.Debug().Str("user", user).Msg("Using system user")
 	}
 
 	// 处理主机名和端口
 	if sshConfig != nil {
 		if sshConfig.HostName != "" && host == sshConfig.Host {
-			log.Info().Str("host", host).Str("sshConfig.HostName", sshConfig.HostName).Msg("Using SSH config")
+			log.Debug().Str("host", host).Str("sshConfig.HostName", sshConfig.HostName).Msg("Using SSH config")
 			host = sshConfig.HostName
 		}
 		if port == 22 && sshConfig.Port > 0 {
@@ -229,14 +227,14 @@ func NewClient(host string, port int, user string, authMethod string, keyPath st
 		switch {
 		case keyPath != "":
 			authMethod = "key"
-			log.Info().Str("keyPath", keyPath).Msg("Using key authentication with specified key path")
+			log.Debug().Str("keyPath", keyPath).Msg("Using key authentication with specified key path")
 		case password != "":
 			authMethod = "password"
-			log.Info().Msg("Using password authentication")
+			log.Debug().Msg("Using password authentication")
 		case sshConfig != nil && sshConfig.IdentityFile != "":
 			authMethod = "key"
 			keyPath = sshConfig.IdentityFile
-			log.Info().Str("keyPath", keyPath).Msg("Using identity file from SSH config")
+			log.Debug().Str("keyPath", keyPath).Msg("Using identity file from SSH config")
 		default:
 			return nil, fmt.Errorf("no authentication method available: please provide either key_path or password")
 		}
@@ -248,7 +246,7 @@ func NewClient(host string, port int, user string, authMethod string, keyPath st
 		if keyPath == "" {
 			if sshConfig != nil && sshConfig.IdentityFile != "" {
 				keyPath = sshConfig.IdentityFile
-				log.Info().Str("keyPath", keyPath).Msg("Using identity file from SSH config")
+				log.Debug().Str("keyPath", keyPath).Msg("Using identity file from SSH config")
 			} else {
 				return nil, fmt.Errorf("key_path is required for key authentication")
 			}
@@ -266,6 +264,8 @@ func NewClient(host string, port int, user string, authMethod string, keyPath st
 		return nil, err
 	}
 
+	log.Info().Str("host", host).Int("port", port).Str("user", user).Str("authMethod", authMethod).Msg("Initial config")
+
 	return &Client{
 		sshClientConfig: sshClientConfig,
 		host:            host,
@@ -281,7 +281,7 @@ func NewClient(host string, port int, user string, authMethod string, keyPath st
 func newSSHClientConfig(user, authMethod, keyPath, password string, timeout int) (*ssh.ClientConfig, error) {
 	var auths []ssh.AuthMethod
 
-	log.Info().Str("user", user).Str("authMethod", authMethod).Str("keyPath", keyPath).Msg("Creating SSH config")
+	log.Debug().Str("user", user).Str("authMethod", authMethod).Str("keyPath", keyPath).Msg("Creating SSH config")
 
 	switch authMethod {
 	case "key":
@@ -293,7 +293,7 @@ func newSSHClientConfig(user, authMethod, keyPath, password string, timeout int)
 			log.Error().Err(err).Str("keyPath", keyPath).Msg("Failed to expand key path")
 			return nil, fmt.Errorf("failed to expand key path: %w", err)
 		}
-		log.Info().Str("expandedPath", expandedPath).Msg("Using expanded key path")
+		log.Debug().Str("expandedPath", expandedPath).Msg("Using expanded key path")
 
 		buffer, err := os.ReadFile(expandedPath)
 		if err != nil {
@@ -306,7 +306,7 @@ func newSSHClientConfig(user, authMethod, keyPath, password string, timeout int)
 			log.Error().Err(err).Str("expandedPath", expandedPath).Msg("Failed to parse private key")
 			return nil, fmt.Errorf("failed to parse private key: %w", err)
 		}
-		log.Info().Str("expandedPath", expandedPath).Msg("Successfully loaded private key")
+		log.Debug().Str("expandedPath", expandedPath).Msg("Successfully loaded private key")
 
 		auths = append(auths, ssh.PublicKeys(key))
 	case "password":
@@ -314,7 +314,7 @@ func newSSHClientConfig(user, authMethod, keyPath, password string, timeout int)
 			return nil, fmt.Errorf("password is required for password authentication")
 		}
 		auths = append(auths, ssh.Password(password))
-		log.Info().Msg("Using password authentication")
+		log.Debug().Msg("Using password authentication")
 	default:
 		return nil, fmt.Errorf("unsupported auth method: %s", authMethod)
 	}
@@ -354,7 +354,7 @@ func (c *Client) Connect(ctx context.Context) error {
 	// 启动保活和重连 goroutine
 	go c.keepAliveAndReconnect(ctx)
 
-	log.Info().Str("host", c.host).Int("port", c.port).Msg("Connecting to SSH server")
+	log.Info().Str("user", c.sshClientConfig.User).Str("host", c.host).Int("port", c.port).Msg("Connecting to SSH server")
 
 	return c.connectWithRetry(ctx, fmt.Sprintf("%s:%d", c.host, c.port))
 }

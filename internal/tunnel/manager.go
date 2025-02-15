@@ -18,25 +18,34 @@ type Manager struct {
 
 // NewManager 创建新的隧道管理器
 func NewManager(cfg *config.Config) *Manager {
-	return &Manager{
-		config:  cfg,
-		tunnels: make([]*Tunnel, 0),
-	}
+	return &Manager{config: cfg, tunnels: make([]*Tunnel, 0)}
 }
 
 // Start 启动所有隧道
 func (m *Manager) Start(ctx context.Context) error {
 	// 为每个服务器配置创建隧道
+	wg := sync.WaitGroup{}
+
 	for _, server := range m.config.Servers {
 		for _, tunnelCfg := range server.Tunnels {
-			tunnel := NewTunnel(server, tunnelCfg)
-			m.tunnels = append(m.tunnels, tunnel)
+			wg.Add(1)
+			go func(tunnelCfg config.TunnelConfig) {
+				defer wg.Done()
 
-			if err := tunnel.Start(ctx); err != nil {
-				log.Error().Err(err).Str("tunnel", tunnel.Name()).Msg("Failed to start tunnel")
-			}
+				tunnel := NewTunnel(server, tunnelCfg)
+				m.tunnels = append(m.tunnels, tunnel)
+
+				log.Info().Str("server", server.Name).Str("host", server.Host).Str("tunnel", tunnel.Name()).Msg("Starting tunnel")
+				if err := tunnel.Start(ctx); err != nil {
+					log.Error().Err(err).Str("tunnel", tunnel.Name()).Msg("Failed to start tunnel")
+					return
+				}
+			}(tunnelCfg)
 		}
 	}
+
+	wg.Wait()
+
 	return nil
 }
 

@@ -44,6 +44,8 @@ type Client struct {
 	isConnected     atomic.Bool
 	// 添加隧道配置存储
 	tunnels []TunnelConfig
+	// 添加 keep-alive goroutine 状态跟踪
+	keepAliveStarted atomic.Bool
 }
 
 // SSHConfig SSH 配置文件解析结构
@@ -351,8 +353,11 @@ func newSSHClientConfig(user, authMethod, keyPath, password string, timeout int)
 
 // Connect 连接到 SSH 服务器
 func (c *Client) Connect(ctx context.Context) error {
-	// 启动保活和重连 goroutine
-	go c.keepAliveAndReconnect(ctx)
+	// 启动保活和重连 goroutine，确保只启动一次
+	if !c.keepAliveStarted.Load() {
+		c.keepAliveStarted.Store(true)
+		go c.keepAliveAndReconnect(ctx)
+	}
 
 	log.Info().Str("user", c.sshClientConfig.User).Str("host", c.host).Int("port", c.port).Msg("Connecting to SSH server")
 
@@ -495,6 +500,14 @@ func (c *Client) Close() error {
 // 端口转发相关
 // -----------------------------
 
+// formatAddr 格式化地址，正确处理 IPv6
+func formatAddr(host string, port int) string {
+	if strings.Contains(host, ":") {
+		return fmt.Sprintf("[%s]:%d", host, port)
+	}
+	return fmt.Sprintf("%s:%d", host, port)
+}
+
 // LocalToRemote 本地到远程的端口转发
 // 在远程服务器上监听端口，将流量转发到本地指定的地址
 func (c *Client) LocalToRemote(ctx context.Context, localHost string, localPort int, remoteHost string, remotePort int) error {
@@ -564,7 +577,7 @@ func (c *Client) LocalToRemote(ctx context.Context, localHost string, localPort 
 
 			connID := atomic.AddInt32(&connCount, 1)
 			go func(remote net.Conn) {
-				localAddr := fmt.Sprintf("%s:%d", localHost, localPort)
+				localAddr := formatAddr(localHost, localPort)
 				remoteAddr := remote.RemoteAddr().String()
 				log.Info().Int32("connID", connID).Str("remoteAddr", remoteAddr).Str("localAddr", localAddr).Msg("New connection")
 

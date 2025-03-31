@@ -48,6 +48,9 @@ func (t *Tunnel) Start(ctx context.Context) error {
 			if err := t.connect(ctx); err != nil {
 				t.retryCount++
 				log.Warn().Err(err).Str("tunnel", t.Name()).Int("retryCount", t.retryCount).Msg("Tunnel connection failed")
+
+				// 重试间隔, 指数增长, 最大为 30 秒
+				time.Sleep(time.Second * time.Duration(min(1<<t.retryCount, 30)))
 			}
 		}
 	}
